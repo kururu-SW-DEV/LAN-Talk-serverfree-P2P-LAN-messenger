@@ -1,0 +1,11 @@
+backup/
+data/
+docs/
+tests/
+vendor/
+secret.key
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
