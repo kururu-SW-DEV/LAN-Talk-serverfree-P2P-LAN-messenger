@@ -94,6 +94,7 @@ pyinstaller --onefile --windowed --name "LAN Talk" --icon=app.ico \
 
 - 같은 로컬 네트워크(LAN) 안에서 사용하도록 설계되었습니다. 인터넷을 통한 원격 연결은 지원하지 않습니다.
 - 현재 Windows 전용입니다(트레이 알림·다크 타이틀바 등이 `ctypes`로 Win32 API를 직접 호출).
+- `LAN Talk.exe`에는 [Pillow](https://python-pillow.org/)가 번들되어 있습니다. 라이선스 전문은 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) 참고.
 
 ---
 
