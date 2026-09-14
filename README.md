@@ -64,7 +64,7 @@ pyinstaller --onefile --windowed --name "LAN Talk" --icon=app.ico \
 
 빌드된 `dist/LAN Talk.exe`는 그 자체로 포터블입니다 — 처음 실행하는 폴더에
 `secret.key`와 `data/`를 자동으로 만들고, 이후 실행마다 그 자리를 그대로
-씁니다. 자세한 배경은 [docs/개발기록/2026-09-15_v6.43_독립실행파일exe빌드지원.md](docs/개발기록/2026-09-15_v6.43_독립실행파일exe빌드지원.md) 참고.
+씁니다.
 
 ---
 
@@ -94,3 +94,9 @@ pyinstaller --onefile --windowed --name "LAN Talk" --icon=app.ico \
 
 - 같은 로컬 네트워크(LAN) 안에서 사용하도록 설계되었습니다. 인터넷을 통한 원격 연결은 지원하지 않습니다.
 - 현재 Windows 전용입니다(트레이 알림·다크 타이틀바 등이 `ctypes`로 Win32 API를 직접 호출).
+
+---
+
+## 변경 이력
+
+간단한 버전별 변경 이력은 [CHANGELOG.md](CHANGELOG.md) 참고.
