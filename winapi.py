@@ -4,6 +4,7 @@ lan_messenger.py에서 분리됨 (유지보수를 위해 여러 파일로 분할
 표준 라이브러리(ctypes)만 사용 — 외부 패키지 불필요."""
 import os
 import sys
+import time
 
 try:
     import ctypes
@@ -26,18 +27,24 @@ if _HAS_CTYPES and os.name == "nt":
     NIM_ADD = 0x0
     NIM_MODIFY = 0x1
     NIM_DELETE = 0x2
+    NIM_SETVERSION = 0x4
+    NOTIFYICON_VERSION_4 = 4
     NIIF_NONE = 0x0
     NIIF_INFO = 0x1
     NIIF_USER = 0x4
+    NIIF_NOSOUND = 0x10
     NIIF_LARGE_ICON = 0x20
     IDI_APPLICATION = 32512
     IMAGE_ICON = 1
     LR_LOADFROMFILE = 0x0010
     LR_DEFAULTSIZE = 0x0040
     # 트레이 아이콘 클릭 콜백용 커스텀 메시지 및, 클릭으로 간주할 lParam 값들.
-    # NIM_SETVERSION을 안 불렀으므로 구버전 방식이라 풍선 클릭은 NIN_BALLOONUSERCLICK로,
-    # 아이콘 자체 클릭은 원시 마우스 메시지(WM_LBUTTONUP 등)로 온다 — 실측 없이도 폭넓게
-    # 잡히도록 흔한 값들을 전부 "클릭"으로 취급한다.
+    # NIM_SETVERSION(버전 4)으로 등록한다 — Windows 10/11에서 풍선이 액션 센터
+    # 토스트로 표시될 때, 구버전(0) 방식으로 두면 토스트를 실제로 클릭해도
+    # NIN_BALLOONUSERCLICK 콜백이 전달되지 않는 경우가 있는 것으로 확인됨(트레이
+    # 아이콘 자체 클릭은 되는데 토스트 클릭만 무반응). 버전 4에서는 아이콘 클릭이
+    # 원시 마우스 메시지 대신 NIN_SELECT/NIN_KEYSELECT로 오므로 그 값들도 같이
+    # "클릭"으로 잡아둔다(기존 원시 마우스 코드값도 호환을 위해 그대로 남겨둠).
     WM_TRAYICON = 0x0400 + 20
     # FlashWindowEx 플래그 — 창이 포커스를 얻으면 Windows가 자동으로 멈춘다.
     FLASHW_STOP = 0
@@ -164,11 +171,157 @@ if _HAS_CTYPES and os.name == "nt":
                             pass
         except Exception:
             pass
+    # ---------- Windows 로그인 시 자동 시작 ----------
+    _RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    _RUN_VALUE_NAME = APP_AUMID
+
+    def _startup_command():
+        """Windows 시작 시 이 앱을 다시 켜기 위한 커맨드 라인 문자열.
+        exe로 빌드된 경우 exe 자신을 가리키고, 소스로 실행 중이면(python
+        lan_messenger.py) pythonw(콘솔 창 없이) + 스크립트 경로를 가리킨다."""
+        if getattr(sys, "frozen", False):
+            return f'"{sys.executable}"'
+        script = os.path.join(app_dir(), "lan_messenger.py")
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        exe = pythonw if os.path.isfile(pythonw) else sys.executable
+        return f'"{exe}" "{script}"'
+
+    def is_run_at_startup_enabled():
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY_PATH, 0, winreg.KEY_READ) as k:
+                winreg.QueryValueEx(k, _RUN_VALUE_NAME)
+                return True
+        except OSError:
+            return False
+
+    def set_run_at_startup(enabled):
+        """Windows 로그인 시 자동 시작 등록/해제. HKCU\\...\\Run 레지스트리만
+        건드리므로 관리자 권한이 필요 없고, 현재 사용자에게만 적용된다."""
+        try:
+            import winreg
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _RUN_KEY_PATH) as k:
+                if enabled:
+                    winreg.SetValueEx(k, _RUN_VALUE_NAME, 0, winreg.REG_SZ, _startup_command())
+                else:
+                    try:
+                        winreg.DeleteValue(k, _RUN_VALUE_NAME)
+                    except FileNotFoundError:
+                        pass
+            return True
+        except OSError:
+            return False
+
+    def _prep_force_foreground_sigs(user32, kernel32):
+        # ctypes는 argtypes/restype을 안 정해주면 전부 32비트 c_int로 취급한다 —
+        # HWND는 64비트 포인터라, 이걸 안 하면 GetForegroundWindow()의 반환값 같은
+        # 게 잘못 잘려서 이 함수 전체가 조용히 오동작한다(실제로 처음 구현했을 때
+        # 이 문제로 아예 안 먹혔다).
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        kernel32.GetCurrentThreadId.argtypes = []
+        user32.AttachThreadInput.restype = wintypes.BOOL
+        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+        user32.ShowWindow.restype = wintypes.BOOL
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.BringWindowToTop.restype = wintypes.BOOL
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        user32.keybd_event.restype = None
+        user32.keybd_event.argtypes = [ctypes.c_byte, ctypes.c_byte, wintypes.DWORD, ctypes.c_void_p]
+        user32.RedrawWindow.restype = wintypes.BOOL
+        user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+        user32.IsIconic.restype = wintypes.BOOL
+        user32.IsIconic.argtypes = [wintypes.HWND]
+
+    def force_foreground_window(hwnd):
+        """SetForegroundWindow만으로는 안 될 때가 있다 — Windows는 "지금 포그라운드인
+        프로세스가 직접, 방금 받은 입력에 대한 응답으로" 호출한 게 아니면 조용히
+        무시해버리는 포그라운드 잠금(foreground lock) 정책이 있다. 트레이 알림 클릭은
+        ctypes 훅 콜백 안에서 곧바로 처리할 수 없어(Tk API를 그 자리에서 부르면 GIL
+        문제로 죽는다) 80ms 폴링 루프(_pump)를 거쳐 뒤늦게 처리되는데, 이 지연 때문에
+        Windows가 더는 "방금 사용자가 누른 것에 대한 직접 응답"으로 안 쳐주는 것으로
+        보인다 — 그래서 그냥 lift()/focus_force()만으로는 창이 맨 앞으로 안 나올 수
+        있다. 두 가지 우회법을 함께 쓴다:
+        1) Alt 키를 눌렀다 떼는 더미 키 입력을 보내 "방금 입력이 있었다"는 상태를
+           만든다(SetForegroundWindow가 잠금을 통과하는 조건 중 하나).
+        2) 그래도 막히는 경우를 대비해, 현재 포그라운드 창의 스레드에 입력 상태를
+           잠깐 붙였다가(AttachThreadInput) 그 안에서 호출한다.
+        마지막으로 SetWindowPos로 TOPMOST를 껐다 켰다 해서 z-order 맨 위로도
+        강제로 올린다(항상 위에 표시 설정과는 무관 — 즉시 원상 복구됨)."""
+        hwnd = wintypes.HWND(hwnd)
+        try:
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            _prep_force_foreground_sigs(user32, kernel32)
+
+            VK_MENU = 0x12
+            KEYEVENTF_KEYUP = 0x2
+            user32.keybd_event(VK_MENU, 0, 0, None)
+            user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, None)
+
+            fg = user32.GetForegroundWindow()
+            cur_thread = kernel32.GetCurrentThreadId()
+            fg_thread = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+            attached = False
+            if fg_thread and fg_thread != cur_thread:
+                attached = bool(user32.AttachThreadInput(cur_thread, fg_thread, True))
+            try:
+                # 주의: 최소화 복원은 호출하는 쪽(app.py의 _on_notify_click)이 이미
+                # self.root.deiconify()/state("normal")로 Tk 자신의 정상 경로를 통해
+                # 처리한 뒤 이 함수를 부른다. 예전에는 여기서 ShowWindow(hwnd, 9)
+                # (SW_RESTORE)를 한 번 더 호출했는데, Tk의 복원 처리가 끝나기 전에
+                # 이 raw Win32 호출이 겹쳐 들어가면 창이 검은 화면으로 뜨는(위젯
+                # 다시 그리기가 중간에 끊기는) 버그가 실제로 확인됐다. 그래서 이미
+                # 정상 상태인데 또 복원 명령을 겹쳐 보내는 일이 없도록, 진짜
+                # 최소화 상태로 남아 있을 때만 SW_RESTORE를 보낸다.
+                if user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                user32.SetForegroundWindow(hwnd)
+                user32.BringWindowToTop(hwnd)
+                HWND_TOPMOST = wintypes.HWND(-1)
+                HWND_NOTOPMOST = wintypes.HWND(-2)
+                SWP_NOSIZE = 0x1
+                SWP_NOMOVE = 0x2
+                SWP_SHOWWINDOW = 0x40
+                flags = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+                user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
+                user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+                RDW_INVALIDATE = 0x1
+                RDW_ERASE = 0x4
+                RDW_ALLCHILDREN = 0x80
+                RDW_UPDATENOW = 0x100
+                user32.RedrawWindow(hwnd, None, None,
+                                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW)
+            finally:
+                if attached:
+                    user32.AttachThreadInput(cur_thread, fg_thread, False)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
 else:
     def setup_windows_app_id():
         pass
 
     def apply_window_icon(root):
+        pass
+
+    def is_run_at_startup_enabled():
+        return False
+
+    def set_run_at_startup(enabled):
+        return False
+
+    def force_foreground_window(hwnd):
         pass
 
 
@@ -235,6 +388,9 @@ class Notifier:
     모든 호출을 광범위하게 try/except로 감싼다).
     """
 
+    _FLASH_INTERVAL_MS = 2500  # 재발동 간격 — Windows가 자체적으로 몇 초 만에 끄는 것보다 짧게
+    _FLASH_MAX_MS = 5 * 60 * 1000  # 최대 5분까지만 반복 — 그 이후엔 자동으로 멈춰 무한 반복 방지
+
     def __init__(self, root, on_click=None):
         self.root = root
         self.ok = False
@@ -242,6 +398,9 @@ class Notifier:
         self._shell32 = None
         self._user32 = None
         self._h_icon = None
+        self._flash_active = False
+        self._flash_job = None
+        self._flash_start_ms = 0
         self.on_click = on_click  # 알림(풍선)이나 트레이 아이콘을 클릭했을 때 호출할 콜백
         if not (_HAS_CTYPES and os.name == "nt"):
             return
@@ -289,6 +448,11 @@ class Notifier:
             if self._shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
                 self._nid = nid
                 self.ok = True
+                try:
+                    nid.uTimeoutOrVersion = NOTIFYICON_VERSION_4
+                    self._shell32.Shell_NotifyIconW(NIM_SETVERSION, ctypes.byref(nid))
+                except Exception:
+                    pass
         except Exception:
             self.ok = False
 
@@ -301,22 +465,26 @@ class Notifier:
             nid.uCallbackMessage = WM_TRAYICON
             nid.szInfoTitle = (title or "")[:63]
             nid.szInfo = (message or "")[:255]
-            # 상단 앱 헤더 아이콘(NIF_ICON/AUMID)만 유지하고 본문 내 하단 큰 아이콘은 미표시
-            nid.dwInfoFlags = NIIF_NONE
+            # 상단 앱 헤더 아이콘(NIF_ICON/AUMID)만 유지하고 본문 내 하단 큰 아이콘은 미표시.
+            # NIIF_NOSOUND: Windows 기본 토스트 알림음을 끈다 — 안 끄면 앱이 직접 재생하는
+            # "띵동" 알림음(_play_notify_sound)과 겹쳐서 소리가 두 번(따로) 난다.
+            nid.dwInfoFlags = NIIF_NONE | NIIF_NOSOUND
             nid.hBalloonIcon = None
             self._shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
         except Exception:
             pass
 
-    def flash(self):
-        """작업표시줄 아이콘을 사용자가 창을 다시 보기 전까지 계속 깜빡이게 한다.
-        기존 FlashWindow(단발성 1회 반짝임)는 눈에 잘 안 띄어서, FlashWindowEx +
-        FLASHW_TIMERNOFG(포커스를 얻을 때까지 계속)로 바꿨다 — 창이 포커스를
-        얻으면 Windows가 자동으로 멈춘다."""
-        if not self.ok:
-            return
+    def _flash_hwnd(self):
+        # 트레이 아이콘 등록(NOTIFYICONDATA.hWnd)과 같은 기준으로, 가능하면 진짜
+        # 최상위 프레임 창(wm_frame)을 쓴다 — winfo_id()는 Tk 내부 자식 창이라,
+        # 작업표시줄과 직접 연관된 Win32 호출에는 프레임 쪽이 더 정확하다.
         try:
-            hwnd = int(self.root.winfo_id())
+            return int(self.root.wm_frame(), 16)
+        except Exception:
+            return int(self.root.winfo_id())
+
+    def _raw_flash(self, hwnd):
+        try:
             info = FLASHWINFO()
             info.cbSize = ctypes.sizeof(FLASHWINFO)
             info.hwnd = hwnd
@@ -326,15 +494,57 @@ class Notifier:
             self._user32.FlashWindowEx(ctypes.byref(info))
         except Exception:
             try:
-                self._user32.FlashWindow(int(self.root.winfo_id()), True)
+                self._user32.FlashWindow(hwnd, True)
             except Exception:
                 pass
 
+    def flash(self):
+        """작업표시줄 아이콘을 사용자가 창을 다시 보기 전까지 계속 깜빡이게 한다.
+
+        실제로 확인해보니 FlashWindowEx에 FLASHW_TIMERNOFG(포커스를 얻을 때까지
+        계속)를 줘도, 최신 Windows에서는 주황색 강조가 몇 초 지나면 저절로
+        꺼진다(문서와 달리 무한정 유지되지 않음) — 그래서 알림이 뜬 직후
+        바로 보지 못한 사용자에게는 "깜빡이지 않았다"처럼 보였다. 이를
+        보완하려고, 창이 포커스를 되찾을 때까지 몇 초 간격으로 계속
+        다시 깜빡이도록(재발동) 타이머를 건다. 무한 루프를 막기 위해 최대
+        지속 시간(_FLASH_MAX_MS)을 두고, 그 이후엔 자동으로 멈춘다."""
+        if not self.ok:
+            return
+        self._flash_active = True
+        self._flash_start_ms = int(time.time() * 1000)
+        hwnd = self._flash_hwnd()
+        self._raw_flash(hwnd)
+        self._schedule_reflash(hwnd)
+
+    def _schedule_reflash(self, hwnd):
+        try:
+            self._flash_job = self.root.after(self._FLASH_INTERVAL_MS,
+                                              lambda: self._reflash_tick(hwnd))
+        except Exception:
+            pass
+
+    def _reflash_tick(self, hwnd):
+        self._flash_job = None
+        if not self._flash_active:
+            return
+        if int(time.time() * 1000) - self._flash_start_ms > self._FLASH_MAX_MS:
+            self._flash_active = False
+            return
+        self._raw_flash(hwnd)
+        self._schedule_reflash(hwnd)
+
     def stop_flash(self):
+        self._flash_active = False
+        if self._flash_job is not None:
+            try:
+                self.root.after_cancel(self._flash_job)
+            except Exception:
+                pass
+            self._flash_job = None
         if not self.ok:
             return
         try:
-            hwnd = int(self.root.winfo_id())
+            hwnd = self._flash_hwnd()
             info = FLASHWINFO()
             info.cbSize = ctypes.sizeof(FLASHWINFO)
             info.hwnd = hwnd
@@ -346,6 +556,13 @@ class Notifier:
             pass
 
     def close(self):
+        self._flash_active = False
+        if self._flash_job is not None:
+            try:
+                self.root.after_cancel(self._flash_job)
+            except Exception:
+                pass
+            self._flash_job = None
         if not self.ok or self._nid is None:
             return
         try:

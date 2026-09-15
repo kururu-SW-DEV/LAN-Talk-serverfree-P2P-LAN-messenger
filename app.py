@@ -25,7 +25,8 @@ from constants import _ICON_PNG_B64
 from netutils import (default_datadir, default_name, korea_time_str, sanitize_chat_text,
                        get_clipboard_image_bytes, get_clipboard_files)
 from canvas_utils import round_rect, smooth_circle_photo, bind_scoped_mousewheel
-from winapi import Notifier, apply_dark_titlebar, apply_ime_font
+from winapi import (Notifier, apply_dark_titlebar, apply_ime_font,
+                     is_run_at_startup_enabled, set_run_at_startup, force_foreground_window)
 from widgets import SplitterHandle, ScrollBottomButton, MinimalScrollbar, PillButton, ChatSearchBar, ReplyBanner, PinBanner, EmojiPicker, MentionPopup, make_search_icon
 from engine import Engine
 import stickers
@@ -33,6 +34,7 @@ from dnd_handler import DndMixin
 from chat_search import ChatSearchMixin
 from chat_renderer import ChatRendererMixin
 from dialogs import DialogsMixin
+from toast_popup import NotificationToast
 
 _WHISTLE_WAV_CACHE = None
 
@@ -116,6 +118,7 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
         self._resize_job = None
         self.q = queue.SimpleQueue()
         self._notifier = None
+        self._toast = None      # 인앱 알림 토스트 팝업(NotificationToast) — 트레이 알림 클릭 신뢰성 문제 우회
         self._tab = "chat"              # "chat" 또는 "friend"
         self._pending_sends = {}        # fid -> {name,size,path,is_image,target}
         self._burn_mode = {}            # ("dm",ip,port) -> 자동 폭파 타이머(초). 0/미설정=꺼짐
@@ -156,6 +159,11 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
             self.root.after(10, self._startup_fail)
             return
 
+        if self.engine.always_on_top:
+            try:
+                self.root.attributes("-topmost", True)
+            except tk.TclError:
+                pass
         self.me_lbl.config(text=self.engine.name)
         self._refresh_me_avatar()
         self._show_empty("대화 상대를 선택하거나 상대를 연결해\n대화를 시작하세요")
@@ -175,6 +183,7 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
         self._notify_click_pending = False
         self.root.after(80, self._pump)
         self.root.after(350, self._prewarm_emoji_system)
+        self.root.after(350, self._prewarm_crypto_pool)
         self.root.after(600, self._maybe_first_run)
         self.root.bind("<Configure>", self._on_root_resize)
         self.root.bind("<Control-b>", lambda e: self._toggle_sidebar())
@@ -196,6 +205,14 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
             stickers.prewarm_stickers()
         except Exception:
             pass
+
+    def _prewarm_crypto_pool(self):
+        """대용량 파일 청크 암호화용 프로세스 풀을 백그라운드 스레드에서 미리
+        띄워둔다(약 200ms) — 안 하면 사용자가 처음 큰 파일을 보내는 순간
+        그 지연을 그대로 겪는다."""
+        import threading
+        import crypto_layer
+        threading.Thread(target=crypto_layer.prewarm_pool, daemon=True).start()
 
     def _toggle_boss_key(self, _e=None):
         """보스키: 메신저 창을 화면과 작업표시줄에서 즉시 숨기거나 복원한다."""
@@ -671,6 +688,9 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
         valid_hidden = self._hidden_conv_keys()
         hidden_cnt = len(valid_hidden)
         unhide_label = f"숨긴 대화 보기 ({hidden_cnt}개)" if hidden_cnt > 0 else "숨긴 대화 보기"
+        top_on = bool(self.root.attributes("-topmost")) if self.engine else False
+        startup_on = is_run_at_startup_enabled()
+        sound_on = self.engine.notify_sound_enabled if self.engine else True
         items = [
             ("상대 연결", self._settings_dialog),
             ("새 그룹 만들기", self._group_create_dialog),
@@ -680,11 +700,41 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
             ("포트 번호 변경", self._change_port_dialog),
             (unhide_label, self._open_hidden_dialog),
             (None, None),
+            (("✓ " if top_on else "　 ") + "항상 위에 표시", self._toggle_always_on_top),
+            (("✓ " if startup_on else "　 ") + "Windows 시작 시 자동 실행", self._toggle_run_at_startup),
+            (("✓ " if sound_on else "　 ") + "알림음", self._toggle_notify_sound),
+            (None, None),
             ("사이드바 숨기기 (Ctrl+B)", self._toggle_sidebar),
         ]
         if self.current:
             items.insert(7, ("현재 대화 숨기기", lambda: self._hide_conversation(self.current)))
         self._popup_menu(x, y, items)
+
+    def _toggle_always_on_top(self):
+        if not self.engine:
+            return
+        new_state = not bool(self.root.attributes("-topmost"))
+        try:
+            self.root.attributes("-topmost", new_state)
+        except tk.TclError:
+            return
+        self.engine.set_always_on_top(new_state)
+        self.status.set("항상 위에 표시를 켰습니다" if new_state else "항상 위에 표시를 껐습니다")
+
+    def _toggle_run_at_startup(self):
+        new_state = not is_run_at_startup_enabled()
+        if set_run_at_startup(new_state):
+            self.status.set("Windows 시작 시 자동 실행을 켰습니다" if new_state else
+                           "Windows 시작 시 자동 실행을 껐습니다")
+        else:
+            self._embed_alert("설정 실패", "자동 실행 설정을 변경하지 못했습니다.", kind="warning")
+
+    def _toggle_notify_sound(self):
+        if not self.engine:
+            return
+        new_state = not self.engine.notify_sound_enabled
+        self.engine.set_notify_sound_enabled(new_state)
+        self.status.set("알림음을 켰습니다" if new_state else "알림음을 껐습니다")
 
     def _unhide_all(self):
         if self.engine:
@@ -2240,12 +2290,36 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
             focused = True
         if focused:
             return
+        self._last_notify_key = key  # 알림을 클릭했을 때 이동할 대화방
+        self._show_toast(title, text, key)
         if self._notifier:
-            self._last_notify_key = key  # 알림을 클릭했을 때 이동할 대화방
-            self._notifier.notify(title, (text or "")[:80])
+            # 트레이 풍선/액션 센터 토스트(Shell_NotifyIcon NIM_MODIFY)는 더 이상
+            # 띄우지 않는다 — 위 _show_toast()의 인앱 팝업과 내용이 겹쳐서 화면에
+            # 알림이 두 개(윈도 토스트 + 인앱 토스트) 동시에 뜨는 중복 문제가 있었다.
+            # 작업표시줄 깜빡임(flash)만 그대로 유지한다.
             self._notifier.flash()
 
+    def _show_toast(self, title, text, key):
+        """트레이 풍선/액션 센터 토스트는 클릭해도 Windows가 클릭 콜백을 앱에
+        전달하지 않는 경우가 실제로 있다(OS 자체의 알려진 한계 — 트레이 아이콘
+        직접 클릭은 되는데 토스트 클릭만 무반응). 그래서 클릭 시 반드시 해당
+        대화방으로 이동해야 하는 알림은 앱이 직접 그리는 팝업(NotificationToast)
+        으로 띄운다 — 이 클릭은 Windows Shell을 거치지 않고 Tkinter 이벤트로
+        바로 받으므로 100% 확실하게 동작한다."""
+        def on_click():
+            self._last_notify_key = key
+            self._on_notify_click()
+        try:
+            if self._toast is not None and self._toast.winfo_exists():
+                self._toast.update_content(title, text, on_click)
+            else:
+                self._toast = NotificationToast(self.root, title, text, on_click)
+        except Exception:
+            pass
+
     def _play_notify_sound(self):
+        if self.engine is not None and not self.engine.notify_sound_enabled:
+            return
         # "띵동" 도어벨 느낌의 알림음을 표준 라이브러리(wave·math)로 직접 합성해
         # 메모리에서 재생한다(임시 파일도, 외부 패키지도 필요 없음). 주의:
         # winsound.PlaySound는 SND_MEMORY와 SND_ASYNC를 같이 쓰면
@@ -2281,6 +2355,15 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
             self.root.state("normal")
             self.root.lift()
             self.root.focus_force()
+            # 복원(deiconify) 처리가 완전히 끝나기 전에 아래 force_foreground_window의
+            # raw Win32 호출(SetWindowPos TOPMOST 토글 등)이 겹쳐 들어가면, 최소화에서
+            # 돌아온 창이 위젯을 다 못 그린 채로 검은 화면이 되는 문제가 있었다.
+            # update()로 지금까지 밀린 이벤트(복원에 따른 다시 그리기 포함)를 먼저
+            # 확실히 다 처리시킨 뒤에 넘어간다.
+            self.root.update()
+            hwnd = int(self.root.wm_frame(), 16)
+            force_foreground_window(hwnd)
+            self.root.update_idletasks()
         except Exception:
             pass
         key = getattr(self, "_last_notify_key", None)

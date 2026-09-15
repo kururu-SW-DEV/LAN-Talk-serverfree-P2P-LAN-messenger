@@ -62,9 +62,13 @@ FONT_NAME_M = (FONT_FAM, 9)
 FONT_HEAD = (FONT_FAM, 12, "bold")
 FONT_BADGE = (FONT_FAM, 7, "bold")
 FONT_FAIL = (FONT_FAM, 8)
-FONT_AV = (FONT_FAM, 8, "bold")
+# 아바타 원(고정 픽셀 크기 이미지) 위에 그리는 이니셜 글자는 음수 크기(= 픽셀 단위,
+# Tk가 DPI에 따라 확대하는 포인트 단위와 달리 고정)를 써야 한다. 양수(포인트)를 쓰면
+# 고해상도(150%, 200% 등) 모니터에서 Tk가 폰트만 DPI 배율만큼 키우는데 원 이미지
+# 자체는 항상 고정 픽셀 크기라, 글자가 원 밖으로 삐져나오는 버그가 있었다.
+FONT_AV = (FONT_FAM, -11, "bold")
 FONT_SENDER = (FONT_FAM, 10, "bold")
-FONT_CHAT_AV = (FONT_FAM, 9, "bold")
+FONT_CHAT_AV = (FONT_FAM, -12, "bold")
 
 # ========== 채팅 캔버스 레이아웃 상수 ==========
 PAD_TOP = 14

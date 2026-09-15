@@ -25,6 +25,7 @@ LAN Talk — 서버 없는 P2P LAN 메신저 (v5.1)
   app.py            - GUI 진입 클래스 (App = 위 믹스인들을 합친 최종 클래스)
 """
 import argparse
+import multiprocessing
 import tkinter as tk
 
 from app import App
@@ -54,4 +55,11 @@ def main():
 
 
 if __name__ == "__main__":
+    # PyInstaller onefile exe에서 대용량 파일 청크 암호화·복호화를 여러 CPU
+    # 코어로 나눠 처리하려고 crypto_layer.py가 멀티프로세싱(ProcessPoolExecutor)을
+    # 쓴다. Windows에서 빌드된 frozen exe는 이 한 줄이 없으면 새로 띄우는 워커
+    # 프로세스마다 전체 앱을 처음부터 다시 실행하려 들어(자식이 또 자식을 낳는
+    # 무한 증식) 반드시 다른 어떤 코드보다도 먼저 호출해야 한다(공식 문서 권장
+    # 위치 그대로 — main() 호출보다도 앞).
+    multiprocessing.freeze_support()
     main()

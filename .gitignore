@@ -2,6 +2,7 @@ backup/
 data/
 docs/
 tests/
+testdata/
 vendor/
 secret.key
 __pycache__/

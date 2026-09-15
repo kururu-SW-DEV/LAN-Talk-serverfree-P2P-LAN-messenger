@@ -48,6 +48,8 @@ class Engine:
         self.name = (name or self._read_settings().get("name") or default_name())
         self.max_file_size = self._clamp_file_size_mb(
             self._read_settings().get("max_file_size_mb")) * 1024 * 1024
+        self.always_on_top = bool(self._read_settings().get("always_on_top", False))
+        self.notify_sound_enabled = bool(self._read_settings().get("notify_sound_enabled", True))
         # 사전 공유키 — app_dir()(소스 폴더)에 둔다: 이 폴더를 통째로 복사해 배포하는
         # 기존 방식 그대로, 최초 실행 PC가 만든 키가 복사를 통해 모든 동료에게 퍼진다.
         self._crypto_key = crypto_layer.load_or_create_key(app_dir())
@@ -1086,6 +1088,21 @@ class Engine:
         port = self._clamp_port(port)
         self._update_settings(lambda cfg: cfg.__setitem__("port", port))
         return port
+
+    def set_always_on_top(self, enabled):
+        """창을 항상 다른 창 위에 표시할지 저장한다(재시작해도 유지)."""
+        enabled = bool(enabled)
+        self.always_on_top = enabled
+        self._update_settings(lambda cfg: cfg.__setitem__("always_on_top", enabled))
+        return enabled
+
+    def set_notify_sound_enabled(self, enabled):
+        """새 메시지 알림음(띵동)을 켜고 끈다(재시작해도 유지). 꺼도 작업표시줄
+        깜빡임·트레이 토스트 자체는 그대로 뜬다 — 소리만 없어진다."""
+        enabled = bool(enabled)
+        self.notify_sound_enabled = enabled
+        self._update_settings(lambda cfg: cfg.__setitem__("notify_sound_enabled", enabled))
+        return enabled
 
     # ---------- 루프 ----------
     def _presence_loop(self):
@@ -2542,6 +2559,7 @@ class Engine:
                 self.sock.close()
             except OSError:
                 pass
+        crypto_layer.shutdown_crypto_pool()
 
     def _emit(self, ev):
         try:

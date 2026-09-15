@@ -59,7 +59,7 @@ Python이 설치되지 않은 PC에도 배포하려면 [PyInstaller](https://pyi
 pip install pyinstaller
 pyinstaller --onefile --windowed --name "LAN Talk" --icon=app.ico \
   --add-data "app.ico;." --collect-all PIL --exclude-module numpy \
-  lan_messenger.py
+  --version-file=version_info.txt lan_messenger.py
 ```
 
 빌드된 `dist/LAN Talk.exe`는 그 자체로 포터블입니다 — 처음 실행하는 폴더에
@@ -86,6 +86,7 @@ pyinstaller --onefile --windowed --name "LAN Talk" --icon=app.ico \
 | `chat_search.py` | 대화방 내 검색(Ctrl+F) 믹스인 |
 | `chat_renderer.py` | 채팅 캔버스 렌더링(말풍선·자동 폭파 배지 등) 믹스인 |
 | `dialogs.py` | 그룹 관리·설정 등 각종 다이얼로그 믹스인 |
+| `toast_popup.py` | 인앱 알림 토스트 팝업(슬라이드 애니메이션) |
 | `app.py` | 위 믹스인들을 합친 최종 GUI 클래스(`App`) |
 
 ---
