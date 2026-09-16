@@ -382,9 +382,6 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
         self.add_btn = self._btn(hrow, "＋", self._open_add_menu,
                                  C_SIDEBAR, C_TEXT, C_ROWSEL, font=FONT_SM, padx=10, pady=3)
         self.add_btn.pack(side="right")
-        self.side_toggle_btn = self._btn(hrow, "◀", self._toggle_sidebar,
-                                         C_SIDEBAR, C_MUTE, C_ROWSEL, font=FONT_SM, padx=8, pady=3)
-        self.side_toggle_btn.pack(side="right", padx=(0, 4))
 
         # 목록
         lw = tk.Frame(side_inner, bg=C_SIDEBAR)
@@ -813,16 +810,32 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
             return
 
         # 부드러운 슬라이딩 애니메이션 실행 (타임베이스 Hermite Smoothstep, 위젯 왜곡 없는 슬라이드 클리핑)
+        #
+        # v6.48: 애니메이션 중 self.side를 pack 상태로 둔 채 매 프레임 width만
+        # 바꾸던 예전 방식은, side가 pack(fill="y")으로 다른 형제 위젯(특히 채팅
+        # 캔버스)과 같은 레이아웃에 묶여 있어서 매 프레임마다 전체 pack 레이아웃을
+        # 다시 계산하고, 그때마다 채팅 캔버스에 <Configure> 이벤트가 발생해
+        # 뻑뻑하고 내부 위젯이 떨리는 원인이 됐다 — 애니메이션 하는 동안만 side를
+        # pack에서 완전히 빼서 place()로 독립된 오버레이로 띄우게 고쳤다.
+        #
+        # 그래도 여전히 버벅인다는 피드백을 받아 한 번 더 원인을 좁혔다: side_inner
+        # 안에는 대화 목록(피어마다 프레임·캔버스·라벨 여러 개로 구성된 진짜
+        # 위젯들)이 들어있는데, 이 실제 위젯 묶음을 매 프레임 옆으로 슬라이드
+        # 시키면 Windows가 그 많은 자식 창(HWND)을 프레임마다 전부 다시 배치·
+        # 리페인트해야 해서 무거웠다. 이제는 애니메이션 동안 실제 목록은 건드리지
+        # 않고 숨겨두고, 배경색만 있는 가벼운 "커튼" 패널 하나만 슬라이드시킨다
+        # (자식 위젯이 하나도 없어 프레임당 비용이 거의 없음). 실제 목록은
+        # 애니메이션이 끝난 뒤 제자리에 한 번만 나타난다 — 180ms 안팎의 짧은
+        # 슬라이드 동안 글자를 읽을 수 없으니 그 사이에 바뀌는 건 체감상 안 보인다.
+        if not hasattr(self, "_sidebar_curtain"):
+            self._sidebar_curtain = tk.Frame(self.side, bg=C_SIDEBAR)
+
         target_w = getattr(self, "_sidebar_width", 195) or 195
         if self._sidebar_visible:
             # 펼치기 (Expand): 0 -> target_w
             start_w = 0
             end_w = target_w
             full_w = target_w
-            self.side.config(width=start_w)
-            if hasattr(self, "side_inner"):
-                self.side_inner.place(x=-full_w, y=0, width=full_w, relheight=1.0)
-            self.side.pack(side="left", fill="y", before=self.splitter)
             if hasattr(self, "splitter_btn"):
                 self.splitter_btn.config(text="◀")
                 self.splitter_btn.place_forget()
@@ -846,7 +859,15 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
                 self.side_toggle_btn.config(text="▶")
             self.status.set("사이드바 숨김 (다시 열려면 ▶ 클릭 또는 기둥 드래그)")
 
-        duration = 0.18  # 180ms 동안 부드럽고 민첩한 슬라이딩
+        if hasattr(self, "side_inner"):
+            self.side_inner.place_forget()
+        self.side.pack_forget()
+        self.side.place(x=0, y=0, width=start_w, relheight=1.0)
+        self._sidebar_curtain.place(x=0, y=0, width=start_w, relheight=1.0)
+        self._sidebar_curtain.lift()
+        self.side.lift()
+
+        duration = 0.22  # 220ms — 급하지 않고 고급스럽게 느껴지는 길이
         start_time = time.perf_counter()
         expanding = self._sidebar_visible
 
@@ -859,14 +880,21 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
             cur_w = int(start_w + (end_w - start_w) * factor)
 
             if p >= 1.0 or (expanding and cur_w >= end_w) or (not expanding and cur_w <= 0):
-                self._sidebar_anim_job = None
+                # _sidebar_anim_job은 여기서 바로 None으로 안 비우고 맨 아래에서
+                # 비운다 — 아래 update_idletasks()가 이 블록에서 일어나는
+                # pack()/config() 때문에 생기는 <Configure>를 곧바로 동기 처리하는데,
+                # 그 시점에도 _on_chat_resize가 "애니메이션 진행 중"으로 보고
+                # 자기 디바운스 타이머를 걸지 않게 하기 위함이다(중복 재렌더링·
+                # 깜빡임 방지, v6.48).
+                self.side.place_forget()
+                self._sidebar_curtain.place_forget()
                 if expanding:
                     self.side.config(width=end_w)
                     if hasattr(self, "side_inner"):
                         self.side_inner.place(x=0, y=0, width=end_w, relheight=1.0)
+                    self.side.pack(side="left", fill="y", before=self.splitter)
                     self._sidebar_width = end_w
                 else:
-                    self.side.pack_forget()
                     if hasattr(self, "side_inner"):
                         self.side_inner.place(x=0, y=0, width=full_w, relheight=1.0)
                     if hasattr(self, "splitter_btn"):
@@ -874,17 +902,29 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
                         self.splitter_btn.place(in_=self.splitter, x=0, rely=0.5, anchor="w", width=20, height=84)
                         self.splitter_btn.lift()
                 self.root.update_idletasks()
+                # side를 pack에 다시 넣거나 빼는 순간 채팅 캔버스 크기가 실제로
+                # 바뀌어(애니메이션 시작·종료 각 1회) <Configure>가 발생하고,
+                # 그게 _on_chat_resize의 120ms 디바운스 타이머를 건드린다. 그
+                # 타이머를 안 지우면 바로 아래에서 다시 그리는 것과 별개로 약
+                # 120ms 뒤에 한 번 더(중복) 다시 그려져서, 스크롤-맨아래 버튼
+                # 같은 오버레이 위젯이 한 번 사라졌다 다시 나타나며 깜빡이는
+                # 것처럼 보였다(v6.48). 중복 재렌더링을 막는다.
+                if getattr(self, "_resize_job", None):
+                    try:
+                        self.root.after_cancel(self._resize_job)
+                    except Exception:
+                        pass
+                    self._resize_job = None
                 if self.current:
                     self._reload_chat(self.current, from_cache=True)
+                self._sidebar_anim_job = None
                 return
 
-            self.side.config(width=cur_w)
-            if hasattr(self, "side_inner"):
-                self.side_inner.place(x=(cur_w - full_w), y=0, width=full_w, relheight=1.0)
-            self.root.update_idletasks()
-            self._sidebar_anim_job = self.root.after(10, step)
+            self.side.place(x=0, y=0, width=cur_w, relheight=1.0)
+            self._sidebar_curtain.place(x=0, y=0, width=cur_w, relheight=1.0)
+            self._sidebar_anim_job = self.root.after(16, step)
 
-        self._sidebar_anim_job = self.root.after(10, step)
+        self._sidebar_anim_job = self.root.after(16, step)
 
     def _on_splitter_press(self, e):
         self._splitter_drag = {
@@ -2130,13 +2170,21 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
         if not p:
             return
         key = p["target"]
+        # 상대의 [파일전송 다운로드 최대크기] 설정이 이 파일보다 작아서 거절된
+        # 경우 — 예전엔 그냥 "네트워크 문제"로만 안내돼 원인을 알 수 없었다(v6.48).
+        if ev.get("reason") == "too_large":
+            max_mb = ev.get("max_mb") or 0
+            fail_msg = (f"{p['name']} 전송 실패 — 상대방의 파일 수신 최대 크기 설정"
+                       f"({max_mb}MB)보다 파일이 커서 거절되었습니다.")
+        else:
+            fail_msg = f"{p['name']} 전송 실패 — 상대가 꺼져 있거나 네트워크 문제일 수 있습니다."
         if self.current == key:
             rec = {"mine": True, "label": "나", "ts": time.time(), "kind": "file",
                   "fname": p["name"], "size": p["size"], "path": p["path"], "is_image": p["is_image"]}
             self._append_active_record(rec)
             self._draw_record(rec)
             if not ev.get("ok"):
-                self._draw_fail(f"{p['name']} 전송 실패 — 상대가 꺼져 있거나 네트워크 문제일 수 있습니다.")
+                self._draw_fail(fail_msg)
             self._finish_render()
         # 그룹 파일 전송은 멤버 수만큼 개별 전송이라 일부만 성공할 수 있다 —
         # sent_count/total_count가 있으면(그룹 전송) 부분 성공도 구분해 보여준다.
@@ -2149,8 +2197,10 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
                 self.status.set(f"{p['name']} 일부 전송 완료 ({sent_count}/{total_count}명 — 오프라인이거나 실패한 멤버 있음)")
             else:
                 self.status.set(f"{p['name']} 전송 실패 (0/{total_count}명)")
+        elif ev.get("ok"):
+            self.status.set(f"{p['name']} 전송 완료")
         else:
-            self.status.set(f"{p['name']} 전송 완료" if ev.get("ok") else f"{p['name']} 전송 실패")
+            self.status.set(fail_msg)
         self._refresh_list()
 
     def _on_file_recv(self, ev):
@@ -2162,7 +2212,8 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
             self.engine.unhide_key(key)
         if self.current == key:
             rec = {"mine": False, "label": name, "ts": ev.get("ts"), "kind": "file",
-                  "fname": ev["name"], "size": ev["size"], "path": ev["path"], "is_image": ev["is_image"]}
+                  "fname": ev["name"], "size": ev["size"], "path": ev["path"], "is_image": ev["is_image"],
+                  "state": "done"}
             self._append_active_record(rec)
             self._draw_record(rec)
             self._finish_render()
@@ -2182,7 +2233,8 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
             self.engine.unhide_key(key)
         if self.current == key:
             rec = {"mine": False, "label": name, "ts": ev.get("ts"), "kind": "file",
-                  "fname": ev["name"], "size": ev["size"], "path": ev["path"], "is_image": ev["is_image"]}
+                  "fname": ev["name"], "size": ev["size"], "path": ev["path"], "is_image": ev["is_image"],
+                  "state": "done"}
             self._append_active_record(rec)
             self._draw_record(rec)
             self._finish_render()

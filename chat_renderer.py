@@ -19,8 +19,31 @@ import stickers
 class ChatRendererMixin:
     """채팅 캔버스 렌더링 및 말풍선/미디어 관리 믹스인."""
 
+    _CHAT_IMAGES_CAP = 1000  # 대화방 하나를 계속 켜둔 채 오래 스크롤·수신해도 메모리가
+    # 무한정 늘지 않도록 둔 상한(v6.48). 대화방을 전환하면 어차피 리스트 자체가 새로
+    # 비워지므로(room switch 시 _chat_images = []), 이 상한은 "방 하나를 몇 시간이고
+    # 계속 켜놓고 이미지를 잔뜩 주고받는" 극단적인 경우에만 작동한다. 다만 이 리스트는
+    # 이미 캔버스에 그려진 PhotoImage가 가비지 컬렉션되지 않게 붙잡아두는 용도라, 상한을
+    # 넘겨 가장 오래된 참조를 밀어내면 그 시점 이후 아주 옛날로 스크롤해 올라갈 때 해당
+    # 이미지가 빈 칸으로 보일 수 있다 — 상한을 넉넉하게 잡아 그 가능성을 낮췄다.
+
+    def _push_chat_image(self, img):
+        self._chat_images.append(img)
+        if len(self._chat_images) > self._CHAT_IMAGES_CAP:
+            del self._chat_images[:len(self._chat_images) - self._CHAT_IMAGES_CAP]
+
     # ---------- 채팅 캔버스 렌더 ----------
     def _on_chat_resize(self, _e=None):
+        # 사이드바 슬라이드 애니메이션 중에는(_toggle_sidebar) side를 잠깐 pack에서
+        # 뺐다가 애니메이션이 끝난 뒤 다시 넣는데, 그 두 순간(시작·종료)에 채팅
+        # 캔버스가 실제로 크기 변경 이벤트(<Configure>)를 받는다. 이 디바운스
+        # 타이머가 그대로 걸리면 애니메이션이 끝나기도 전에(120ms 후) 채팅 전체가
+        # 다시 그려지거나, _toggle_sidebar가 애니메이션 종료 시 직접 부르는
+        # 재렌더링과 겹쳐 두 번 그려지면서 스크롤-맨아래 버튼 같은 오버레이
+        # 위젯이 깜빡이는 것처럼 보였다(v6.48) — 애니메이션 진행 중에는 이 타이머를
+        # 걸지 않는다. 애니메이션이 끝나면 _toggle_sidebar가 직접 재렌더링한다.
+        if getattr(self, "_sidebar_anim_job", None):
+            return
         if self._resize_job:
             try:
                 self.root.after_cancel(self._resize_job)
@@ -168,8 +191,9 @@ class ChatRendererMixin:
                 has_unread = bool(unread)
                 badge_num = "1"
             full_txt = f"{burn_tag}{badge_num}  {tmin}" if has_unread else f"{burn_tag}{tmin}"
-            tid = self.chat.create_text(w - MARGIN_SIDE, self._chat_y, text=full_txt,
-                                        font=FONT_XS, fill=C_AWAY if has_unread else C_MUTE, anchor="ne")
+            # v6.48: 사용자 요청으로 내 메시지도 좌측 정렬로 통일(아바타는 그대로 안 붙임).
+            tid = self.chat.create_text(MARGIN_SIDE, self._chat_y, text=full_txt,
+                                        font=FONT_XS, fill=C_AWAY if has_unread else C_MUTE, anchor="nw")
             bbox = self.chat.bbox(tid)
             self._chat_y = bbox[3] + 4
         else:
@@ -192,12 +216,12 @@ class ChatRendererMixin:
                 cx = ax1 + PEER_AVATAR_SIZE // 2
                 cy = ay1 + PEER_AVATAR_SIZE // 2
                 self.chat.create_image(cx, cy, image=photo, anchor="center")
-                self._chat_images.append(photo)
+                self._push_chat_image(photo)
             else:
                 # 2) 사진이 없는 경우: 4x4 슈퍼샘플링 앤티앨리어싱된 부드러운 단색 원형 이미지 + 중앙 이니셜
                 photo = smooth_circle_photo(PEER_AVATAR_SIZE, bg)
                 self.chat.create_image(ax1, ay1, image=photo, anchor="nw")
-                self._chat_images.append(photo)
+                self._push_chat_image(photo)
                 cx = ax1 + PEER_AVATAR_SIZE / 2
                 cy = ay1 + PEER_AVATAR_SIZE / 2
                 self.chat.create_text(cx, cy, text=self._initial(label),
@@ -250,29 +274,27 @@ class ChatRendererMixin:
             r_sender = (reply.get("name") or "답장").strip()
             r_snippet = (reply.get("text") or "").replace("\n", " ").strip()[:35]
             q_text = f"{r_sender}\n{r_snippet}"
-            init_x = (w - MARGIN_SIDE) if mine else PEER_BUBBLE_X
+            # v6.48: 내 메시지도 좌측 정렬로 통일 — 아바타 들여쓰기가 없는 내
+            # 메시지는 MARGIN_SIDE, 아바타가 있는 상대 메시지는 PEER_BUBBLE_X에서 시작.
+            init_x = MARGIN_SIDE if mine else PEER_BUBBLE_X
             reply_tid = self.chat.create_text(init_x, top + BUBBLE_PAD_V, text=q_text, font=FONT_XS,
                                               fill=("#bfdbfe" if mine else C_MUTE), anchor="nw",
                                               width=max_w - 12, justify="left")
             rb = self.chat.bbox(reply_tid)
             reply_h = (rb[3] - rb[1]) + 8
 
-        init_x = (w - MARGIN_SIDE) if mine else PEER_BUBBLE_X
+        init_x = MARGIN_SIDE if mine else PEER_BUBBLE_X
         tid = self.chat.create_text(init_x, top + BUBBLE_PAD_V + reply_h, text=text, font=FONT_MSG,
                                     fill=("white" if mine else C_TEXT), anchor="nw",
-                                    width=max_w, justify=("right" if mine else "left"))
+                                    width=max_w, justify="left")
         bx1, by1, bx2, by2 = self.chat.bbox(tid)
         content_w = bx2 - bx1
         if reply_tid:
             rb = self.chat.bbox(reply_tid)
             content_w = max(content_w, rb[2] - rb[0] + 10)
         bw = content_w + 2 * BUBBLE_PAD_H
-        if mine:
-            rx2 = w - MARGIN_SIDE
-            rx1 = rx2 - bw
-        else:
-            rx1 = PEER_BUBBLE_X
-            rx2 = rx1 + bw
+        rx1 = MARGIN_SIDE if mine else PEER_BUBBLE_X
+        rx2 = rx1 + bw
         ry1 = top
         ry2 = by2 + BUBBLE_PAD_V
         dx = (rx1 + BUBBLE_PAD_H) - bx1
@@ -475,9 +497,9 @@ class ChatRendererMixin:
         w = self._chat_width()
         top = self._chat_y
         iw, ih = img.width(), img.height()
-        ix = (w - MARGIN_SIDE - iw) if mine else PEER_BUBBLE_X
+        ix = MARGIN_SIDE if mine else PEER_BUBBLE_X  # v6.48: 내 메시지도 좌측 정렬 통일
         iid = self.chat.create_image(ix, top, image=img, anchor="nw")
-        self._chat_images.append(img)  # GC 방지
+        self._push_chat_image(img)  # GC 방지
         pad = 3
         rid = round_rect(self.chat, ix - pad, top - pad, ix + iw + pad, top + ih + pad,
                          r=BUBBLE_RADIUS, fill=(C_ME if mine else C_PEER),
@@ -498,6 +520,7 @@ class ChatRendererMixin:
         size_txt = self._human_size(rec.get("size"))
         path = rec.get("path") or ""
         exists = bool(path) and os.path.exists(path)
+        done = rec.get("state") == "done"
         if mine:
             card_w = min(260, max(160, int(w * 0.72)))
         else:
@@ -510,18 +533,22 @@ class ChatRendererMixin:
                                          fill=("white" if mine else C_TEXT), anchor="nw",
                                          width=card_w - 2 * pad - icon_w - 20)
         nb = self.chat.bbox(name_tid)
-        sub = size_txt if exists else f"{size_txt} · 전송 중…"
+        if exists:
+            sub = size_txt
+        elif done:
+            # 전송 자체는 완료됐지만(수신 기록에 남음) 사용자가 다운로드 폴더에서
+            # 파일을 직접 지웠거나 옮긴 경우 — "전송 중…"이라고 하면 영영 끝나지
+            # 않을 것처럼 보여 혼란을 준다("전송 중" 버그, v6.48).
+            sub = f"{size_txt} · 파일 없음(삭제되었거나 이동됨)"
+        else:
+            sub = f"{size_txt} · 전송 중…"
         sub_tid = self.chat.create_text(0, 0, text=sub, font=FONT_XS,
                                         fill=("#dbe7fb" if mine else C_MUTE), anchor="nw")
         sb = self.chat.bbox(sub_tid)
         text_h = (nb[3] - nb[1]) + 4 + (sb[3] - sb[1])
         card_h = max(52, text_h + 2 * pad)
-        if mine:
-            cx2 = w - MARGIN_SIDE
-            cx1 = cx2 - card_w
-        else:
-            cx1 = PEER_BUBBLE_X
-            cx2 = cx1 + card_w
+        cx1 = MARGIN_SIDE if mine else PEER_BUBBLE_X  # v6.48: 내 메시지도 좌측 정렬 통일
+        cx2 = cx1 + card_w
         cy1, cy2 = top, top + card_h
         rid = round_rect(self.chat, cx1, cy1, cx2, cy2, r=BUBBLE_RADIUS,
                          fill=(C_ME if mine else C_PEER), outline=("" if mine else C_BORDER))
@@ -529,7 +556,7 @@ class ChatRendererMixin:
         file_dot_bg = "#ffffff" if mine else C_SEARCHBG
         photo_file_dot = smooth_circle_photo(28, file_dot_bg)
         dot_id = self.chat.create_image(icon_cx - 14, icon_cy - 14, image=photo_file_dot, anchor="nw")
-        self._chat_images.append(photo_file_dot)
+        self._push_chat_image(photo_file_dot)
         glyph_id = self.chat.create_text(icon_cx, icon_cy, text="📄", font=(FONT_FAM, 12))
         tx, ty = cx1 + pad + icon_w, cy1 + pad
         self.chat.coords(name_tid, tx, ty)
@@ -569,7 +596,7 @@ class ChatRendererMixin:
         d = STICKER_DIAMETER
         r = d / 2
         top = self._chat_y
-        cx = (w - MARGIN_SIDE - r) if mine else (PEER_BUBBLE_X + r)
+        cx = (MARGIN_SIDE + r) if mine else (PEER_BUBBLE_X + r)  # v6.48: 좌측 정렬 통일
         cy = top + r
         stickers.draw_sticker(self.chat, cx, cy, r, rec.get("sticker_id"), self._chat_images)
         next_y = top + d + 8

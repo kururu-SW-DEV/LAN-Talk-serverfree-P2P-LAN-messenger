@@ -114,6 +114,7 @@ class Engine:
         self._load_groups()
         self._load_hidden()
         self._load_aliases()
+        self._load_known_names()
         self._load_history_peers()
         self._load_categories()
         self._load_pinned_notices()
@@ -465,6 +466,38 @@ class Engine:
         self._save_aliases()
         self._emit({"ev": "peer"})
 
+    # ---------- 상대 이름 기억(마지막으로 확인된 표시 이름, 오프라인이어도 유지) ----------
+    def _load_known_names(self):
+        raw = self._read_settings().get("known_names") or {}
+        if isinstance(raw, dict):
+            self.known_names = {str(k): str(v).strip() for k, v in raw.items() if str(v).strip()}
+        else:
+            self.known_names = {}
+
+    def _save_known_names(self):
+        self._update_settings(
+            lambda cfg: cfg.__setitem__("known_names", dict(self.known_names)))
+
+    def get_known_name(self, key):
+        if not key:
+            return None
+        return self.known_names.get(self._key_to_str(key))
+
+    def _remember_name(self, key, name):
+        """상대의 실제 표시 이름(별칭이 아니라 상대가 자기 이름으로 broadcast하는
+        값)을 한 번이라도 확인하면 계속 기억해둔다. self.peers는 메모리에만 있고
+        상대가 오프라인이 되면(12초) 혹은 앱을 재시작하면 사실상 비어버려서, 그
+        전까지는 알던 이름이 IP 주소로 되돌아가 보였다(색상도 이름 문자열 해시로
+        정하다 보니 그때마다 같이 바뀌어 "색이 랜덤하게 바뀐다"로 보인 것 — v6.48).
+        settings.json에 영속화해 오프라인·재시작에도 마지막으로 알려진 이름을
+        계속 보여줄 수 있게 한다."""
+        if not name:
+            return
+        kstr = self._key_to_str(key)
+        if self.known_names.get(kstr) != name:
+            self.known_names[kstr] = name
+            self._save_known_names()
+
     # ---------- 친구 카테고리(폴더) 분류 ----------
     def _load_categories(self):
         raw = self._read_settings().get("contact_categories") or {}
@@ -760,8 +793,10 @@ class Engine:
             for key in self.static:
                 if key not in self.peers:
                     ip, port = key
-                    self.peers[key] = {"name": ip, "ip": ip, "port": port,
-                                       "last": 0, "static": True}
+                    self.peers[key] = {
+                        "name": (self.get_alias(("dm", ip, port))
+                                or self.get_known_name(("dm", ip, port)) or ip),
+                        "ip": ip, "port": port, "last": 0, "static": True}
         self._emit({"ev": "peer"})
 
     def _load_history_peers(self):
@@ -786,7 +821,8 @@ class Engine:
                 with self.plock:
                     if key not in self.peers:
                         self.peers[key] = {
-                            "name": self.get_alias(("dm", ip, port)) or ip,
+                            "name": (self.get_alias(("dm", ip, port))
+                                    or self.get_known_name(("dm", ip, port)) or ip),
                             "ip": ip,
                             "port": port,
                             "last": 0,
@@ -1055,7 +1091,7 @@ class Engine:
     @staticmethod
     def _clamp_file_size_mb(mb):
         """설정값을 1~MAX_FILE_SIZE_LIMIT_MB(1024, 1GB) 사이로 강제한다.
-        저장된 값이 없거나(최초 실행) 손상됐으면 기본값(20MB)으로 되돌린다."""
+        저장된 값이 없거나(최초 실행) 손상됐으면 기본값(1024MB)으로 되돌린다."""
         try:
             mb = int(mb)
         except (TypeError, ValueError):
@@ -1111,8 +1147,10 @@ class Engine:
                 for key in self.static:
                     if key not in self.peers:
                         ip, port = key
-                        self.peers[key] = {"name": ip, "ip": ip, "port": port,
-                                           "last": 0, "static": True}
+                        self.peers[key] = {
+                            "name": (self.get_alias(("dm", ip, port))
+                                    or self.get_known_name(("dm", ip, port)) or ip),
+                            "ip": ip, "port": port, "last": 0, "static": True}
             pkt = self._presence_packet()
             self._send_dict(pkt, "255.255.255.255", self.port)
             with self.plock:
@@ -1547,9 +1585,21 @@ class Engine:
             except (TypeError, ValueError):
                 return
             if size < 0 or size > self.max_file_size:
+                # 예전엔 그냥 조용히 무시했다 — 보내는 쪽은 거절당한 줄 모르고 큰
+                # 파일을 처음부터 끝까지 다 전송한 뒤에도(수신 측은 애초에
+                # transfers_in에 등록조차 안 해서 전부 버려짐) "성공"으로 표시되는
+                # 버그가 있었다(v6.48에서 수정). 이제 거절 이유를 명시적으로 돌려준다.
+                self._send_dict({"type": "file_reject", "id": uuid.uuid4().hex,
+                                 "tid": self.instance_id, "fid": fid, "reason": "too_large",
+                                 "max_mb": self.max_file_size // (1024 * 1024),
+                                 "port": self.port}, ip, sport)
                 return
             max_chunks = (self.max_file_size // FILE_CHUNK_SIZE) + 10
             if total > max_chunks:
+                self._send_dict({"type": "file_reject", "id": uuid.uuid4().hex,
+                                 "tid": self.instance_id, "fid": fid, "reason": "too_large",
+                                 "max_mb": self.max_file_size // (1024 * 1024),
+                                 "port": self.port}, ip, sport)
                 return
             name = str(d.get("name") or "파일")[:200]
             gid = d.get("gid")
@@ -1606,8 +1656,14 @@ class Engine:
                 self._partial_index[resume_key] = {"part": part_name, "next_seq": resume_from,
                                                     "total": total, "ts": time.time()}
             self._save_partial_index()
+            # "port" 필드(내 리스닝 포트)를 빠뜨리면, 발신 측 핸들러가 이 응답을
+            # 받을 때 sport를 기본 포트(50707)로만 인식해버려서, 발신자가 기본이
+            # 아닌 포트로 파일을 보낼 때(포트 변경 기능 사용 시) 이어받기 정보가
+            # 엉뚱한 키에 저장돼 절대 못 찾는 버그가 있었다(v6.48에서 발견·수정 —
+            # file_reject 기능을 추가하다가 같은 패턴을 재현해보고서 발견함).
             self._send_dict({"type": "file_offer_ack", "id": uuid.uuid4().hex,
-                             "tid": self.instance_id, "fid": fid, "resume_from": resume_from}, ip, sport)
+                             "tid": self.instance_id, "fid": fid, "resume_from": resume_from,
+                             "port": self.port}, ip, sport)
             return
 
         if dtype == "file_offer_ack":
@@ -1627,6 +1683,23 @@ class Engine:
                 # 덮어씌워져 엉뚱한 지점부터 이어보내는 경합(race)이 생길 수 있었다.
                 with self.tlock:
                     self._resume_info[(fid, ip, sport)] = resume_from
+            return
+
+        if dtype == "file_reject":
+            ip = addr[0]
+            try:
+                sport = int(d.get("port") or DEFAULT_PORT)
+            except (TypeError, ValueError):
+                sport = addr[1]
+            fid = str(d.get("fid") or "")
+            if fid:
+                try:
+                    max_mb = int(d.get("max_mb") or 0)
+                except (TypeError, ValueError):
+                    max_mb = 0
+                with self.tlock:
+                    self._resume_info[(fid, ip, sport)] = {
+                        "rejected": True, "reason": str(d.get("reason") or ""), "max_mb": max_mb}
             return
 
         if dtype == "file_chunk":
@@ -1699,7 +1772,8 @@ class Engine:
         with self.plock:
             p = self.peers.get(key)
             if p is None:
-                self.peers[key] = {"name": name or ip, "ip": ip, "port": key[1],
+                self.peers[key] = {"name": name or self.get_known_name(("dm", ip, key[1])) or ip,
+                                   "ip": ip, "port": key[1],
                                    "last": time.time(), "static": key in self.static,
                                    "av": avatar_hash or "", "status": status or "online"}
                 changed = True
@@ -1717,6 +1791,8 @@ class Engine:
                     p["status"] = status
                     changed = True
                 p["last"] = time.time()
+        if name and name != "?":
+            self._remember_name(("dm", ip, key[1]), name)
         if changed:
             self._emit({"ev": "peer"})
         if avatar_hash:
@@ -1984,10 +2060,16 @@ class Engine:
         if gid:
             offer["gid"] = gid
         if not self._send_reliable_wait(offer, ip, port):
-            return False
+            return False, None
         # 상대가 이 파일을 이미 부분적으로(혹은 전부) 갖고 있으면 그만큼 건너뛴다
         # (이어받기) — 예전에 끊긴 전송을 다시 시도할 때 처음부터 다시 안 보내도 됨.
         resume_from = self._wait_resume_from(fid, ip, port)
+        if isinstance(resume_from, dict) and resume_from.get("rejected"):
+            # 상대의 파일 수신 최대 크기 설정보다 커서 거절당함 — 예전엔 이 신호가
+            # 아예 없어서, 보내는 쪽은 거절당한 줄도 모르고 조각을 전부 쏘아보내고
+            # "성공"으로 표시했다(200MB 전송 시 받는 쪽엔 아무것도 안 남는 버그의
+            # 원인, v6.48에서 수정).
+            return False, resume_from
         if resume_from:
             _emit_progress(resume_from, resumed=True)
         ok = True
@@ -1997,7 +2079,7 @@ class Engine:
                 file_size = os.path.getsize(path) if os.path.exists(path) else 0
                 if file_size == 0:
                     if resume_from >= total:
-                        return True  # 상대가 이미 다 받음(빈 파일)
+                        return True, None  # 상대가 이미 다 받음(빈 파일)
                     pkt = {"type": "file_chunk", "id": uuid.uuid4().hex, "tid": self.instance_id,
                            "fid": fid, "seq": 0, "data": "", "port": self.port}
                     if gid:
@@ -2007,7 +2089,7 @@ class Engine:
                     _emit_progress(1)
                 else:
                     if resume_from >= total:
-                        return True  # 상대가 이미 전부 받음
+                        return True, None  # 상대가 이미 전부 받음
                     if seq > 0:
                         f.seek(seq * FILE_CHUNK_SIZE)
                     while True:
@@ -2027,7 +2109,7 @@ class Engine:
         except OSError as e:
             applog.log("file_send", e, detail=f"{path} -> {ip}:{port}")
             ok = False
-        return ok
+        return ok, None
 
     def _file_send_worker(self, fid, path, name, total, target, members):
         gid = target[1] if target[0] == "grp" else None
@@ -2035,9 +2117,10 @@ class Engine:
             self._emit({"ev": "file_sent", "fid": fid, "ok": False})
             return
         sent_count = None
+        reject_info = None
         if len(members) == 1:
             ip, port = members[0]
-            ok_all = self._file_send_to_member(fid, path, name, total, gid, ip, port)
+            ok_all, reject_info = self._file_send_to_member(fid, path, name, total, gid, ip, port)
         else:
             # 그룹 파일 전송 — 예전에는 멤버 1명씩 순서대로 처음부터 끝까지 다 보낸 뒤
             # 다음 멤버로 넘어갔다(5명 그룹에 20MB면 사실상 80MB를 순차로 보내는 셈이라
@@ -2047,8 +2130,8 @@ class Engine:
             progress_agg = ({}, threading.Lock(), len(members))
 
             def _run(ip, port):
-                ok = self._file_send_to_member(fid, path, name, total, gid, ip, port,
-                                               progress_agg=progress_agg)
+                ok, _ = self._file_send_to_member(fid, path, name, total, gid, ip, port,
+                                                   progress_agg=progress_agg)
                 with results_lock:
                     results.append(ok)
 
@@ -2064,8 +2147,12 @@ class Engine:
             # 받았는지도 같이 넘겨 GUI가 부분 성공을 구분해 보여줄 수 있게 한다.
             sent_count = sum(1 for r in results if r)
             ok_all = sent_count > 0
-        self._emit({"ev": "file_sent", "fid": fid, "ok": ok_all,
-                    "sent_count": sent_count, "total_count": len(members)})
+        ev = {"ev": "file_sent", "fid": fid, "ok": ok_all,
+              "sent_count": sent_count, "total_count": len(members)}
+        if reject_info:
+            ev["reason"] = reject_info.get("reason")
+            ev["max_mb"] = reject_info.get("max_mb")
+        self._emit(ev)
 
     def _unique_path(self, path):
         if not os.path.exists(path):
@@ -2115,7 +2202,7 @@ class Engine:
         target = tr["target"]
         ip, sport = tr["from"]
         if target[0] == "dm":
-            self._append_log_file(ip, sport, "in", name, actual_size, save_path, is_image)
+            self._append_log_file(ip, sport, "in", name, actual_size, save_path, is_image, state="done")
             self._emit({"ev": "file_recv", "peer": (ip, sport), "path": save_path, "name": name,
                        "size": actual_size, "is_image": is_image, "ts": time.time()})
         else:
@@ -2123,7 +2210,7 @@ class Engine:
             with self.plock:
                 p = self.peers.get((ip, sport))
             sender_name = (p or {}).get("name") or ip
-            self._append_group_log_file(gid, sender_name, False, name, actual_size, save_path, is_image)
+            self._append_group_log_file(gid, sender_name, False, name, actual_size, save_path, is_image, state="done")
             self._emit({"ev": "gfile_recv", "gid": gid,
                        "who": {"ip": ip, "port": sport, "name": sender_name},
                        "path": save_path, "name": name, "size": actual_size,
@@ -2237,9 +2324,11 @@ class Engine:
         if updated:
             self._emit({"ev": "read_ack", "peer": (ip, port), "flush": True})
 
-    def _append_log_file(self, ip, port, direction, name, size, path, is_image):
+    def _append_log_file(self, ip, port, direction, name, size, path, is_image, state=None):
         rec = {"dir": direction, "kind": "file", "name": name, "size": size,
               "path": path, "is_image": bool(is_image), "ts": time.time()}
+        if state:
+            rec["state"] = state
         try:
             with self.log_lock, open(self._log_path(ip, port), "a", encoding="utf-8") as f:
                 f.write(self._enc_log_line(rec))
@@ -2301,9 +2390,11 @@ class Engine:
         except OSError as e:
             applog.log("append_group_log", e, detail=gid)
 
-    def _append_group_log_file(self, gid, name, mine, fname, size, path, is_image):
+    def _append_group_log_file(self, gid, name, mine, fname, size, path, is_image, state=None):
         rec = {"name": name, "mine": bool(mine), "kind": "file", "fname": fname, "size": size,
               "path": path, "is_image": bool(is_image), "ts": time.time()}
+        if state:
+            rec["state"] = state
         try:
             with self.log_lock, open(self._group_log_path(gid), "a", encoding="utf-8") as f:
                 f.write(self._enc_log_line(rec))

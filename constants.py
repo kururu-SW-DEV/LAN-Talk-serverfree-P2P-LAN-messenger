@@ -10,10 +10,13 @@ RETRY_WAIT = 1.2             # 재시도 대기(초)
 MAX_LEN = 3000               # 메시지 최대 길이
 GROUP_HISTORY_SNAPSHOT = 50  # 그룹 초대 시 함께 보내는 최근 대화 개수
 GROUP_TIME_GAP = 300          # 같은 발신자의 연속 메시지 그룹핑 최대 시간 간격(초, 5분)
-DEFAULT_MAX_FILE_SIZE = 20 * 1024 * 1024   # 파일 전송 최대 크기 기본값(20MB) — 서버 없이 인원수만큼
-                                    # 개별 유니캐스트로 순차 전송하는 구조라 보수적으로 제한.
-                                    # 설정(⚙ 상대 연결 창)에서 1~1024MB 사이로 사용자가 바꿀 수 있다
-                                    # (Engine.max_file_size, settings.json의 "max_file_size_mb").
+DEFAULT_MAX_FILE_SIZE = 1024 * 1024 * 1024   # 파일 전송 최대 크기 기본값(1024MB=1GB, v6.48부터
+                                    # 20MB에서 상향 — 양쪽 다 이 값 이상이어야 그 크기 파일을 받을 수
+                                    # 있는데(설정이 한쪽이라도 낮으면 상대가 조용히 거절), 기본값이
+                                    # 낮으면 대용량 전송이 늘 막혀서 사용자가 매번 양쪽 설정을 먼저
+                                    # 맞춰야 했다. 설정(⚙ 상대 연결 창)에서 1~1024MB 사이로 여전히
+                                    # 사용자가 바꿀 수 있다(Engine.max_file_size, settings.json의
+                                    # "max_file_size_mb").
 MAX_FILE_SIZE_LIMIT_MB = 1024       # 사용자가 설정할 수 있는 상한(1GB)
 FILE_CHUNK_SIZE = 32 * 1024        # 청크당 원본 32KB (base64 인코딩 후에도 UDP 세이프 마진 안)
 IMAGE_EXTS = {".png", ".gif", ".bmp"}  # tkinter.PhotoImage가 외부 패키지 없이 직접 디코딩 가능한 형식

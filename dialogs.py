@@ -574,11 +574,94 @@ class DialogsMixin:
                 pass
         except OSError:
             pass
-        self._embed_alert("방화벽 안내",
-                   "최초 실행 시 Windows 방화벽에서 [액세스 허용]을 눌러 주세요.\n\n"
-                   "창이 나타나지 않았거나 메시지 전송이 계속 실패하면,\n"
-                   f"관리팀에 UDP {self.engine.port}번(수신) 허용을 요청하세요.",
-                   kind="info")
+        port = self.engine.port
+        want = self._embed_confirm(
+            "방화벽 안내",
+            f"다른 PC와 통신하려면 Windows 방화벽에서 UDP {port}번(수신)을 허용해야 합니다.\n\n"
+            "지금 자동으로 예외 규칙을 등록할까요? (관리자 권한 승인 창이 뜰 수 있습니다)\n"
+            "나중에 [취소]해도 방화벽이 직접 [액세스 허용] 창을 띄워주면 그때 눌러주시면 됩니다.",
+            kind="info", ok_label="자동 등록", cancel_label="나중에")
+        if not want:
+            return
+        # _register_firewall_rule은 UAC 승인 대기 + 등록 확인을 위해 최대 몇 초간
+        # time.sleep()으로 블로킹된다. 메인 스레드(Tk 이벤트 루프)에서 그대로
+        # 부르면 그 몇 초 동안 화면이 전혀 다시 그려지지 않아, 방금 닫힌 확인창
+        # 자리에 있던 빈 대화 안내 문구가 그 시간 뒤에야 한꺼번에 "튀어나오듯"
+        # 다시 나타나는 것처럼 보이는 버그가 있었다(v6.48). 백그라운드 스레드로
+        # 빼서 Tk 이벤트 루프가 계속 정상적으로 화면을 그리게 한다.
+        self.status.set("방화벽 예외 규칙 등록 중... (관리자 권한 승인 창을 확인해주세요)")
+
+        def worker():
+            ok = self._register_firewall_rule(port)
+            self.root.after(0, lambda: self._on_firewall_register_done(ok, port))
+
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_firewall_register_done(self, ok, port):
+        if not self.root.winfo_exists():
+            return
+        try:
+            self.status.set("왼쪽 목록에서 대화 상대를 선택하세요")
+        except Exception:
+            pass
+        if ok:
+            self._embed_alert("방화벽 등록 완료",
+                              f"UDP {port}번(수신) 예외 규칙을 등록했습니다.", kind="info")
+        else:
+            self._embed_alert("방화벽 자동 등록 실패",
+                              "관리자 권한 승인이 취소됐거나 등록에 실패했습니다.\n\n"
+                              "최초 실행 시 뜨는 Windows 방화벽 창에서 [액세스 허용]을 눌러주시거나,\n"
+                              f"관리팀에 UDP {port}번(수신) 허용을 요청하세요.",
+                              kind="warning")
+
+    def _register_firewall_rule(self, port):
+        """netsh로 인바운드 UDP 예외 규칙을 등록한다. 관리자 권한이 없으면 UAC
+        상승 창을 한 번 더 띄워 재시도한다(사용자가 이미 위 확인창에서 등록에
+        동의한 뒤라 이중 승인이지만, Windows 정책상 UAC 자체는 생략할 수 없다)."""
+        import subprocess
+        rule_name = "LAN Talk"
+        args = ["advfirewall", "firewall", "add", "rule",
+               f"name={rule_name}", "dir=in", "action=allow", "protocol=UDP",
+               f"localport={port}"]
+        no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            r = subprocess.run(["netsh"] + args, capture_output=True, timeout=10,
+                               creationflags=no_window)
+            if r.returncode == 0:
+                return True
+        except Exception:
+            pass
+        # 관리자 권한 없이 실패했을 가능성 — UAC 상승으로 재시도.
+        try:
+            import ctypes
+            # ShellExecuteW의 lpParameters는 subprocess.run(list)와 달리 하나의
+            # 문자열을 Windows가 공백 기준으로 다시 토큰화한다 — "name=LAN Talk"처럼
+            # 값에 공백이 있는 인자를 그냥 join만 하면 "name=LAN"과 "Talk"로 쪼개져
+            # netsh가 규칙을 못 만들고 조용히 실패했다(v6.48 첫 구현 버그, 실제
+            # 사용자 리포트로 발견). list2cmdline으로 Windows 커맨드라인 규칙에 맞게
+            # 제대로 따옴표를 씌워야 한다.
+            params = subprocess.list2cmdline(args)
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", "netsh", params, None, 0)
+            if ret <= 32:  # 32 이하는 실행 자체가 실패(예: 사용자가 UAC 취소)했다는 뜻
+                return False
+        except Exception:
+            return False
+        # 상승된 프로세스는 비동기로 실행되므로, 등록이 실제로 반영될 때까지
+        # 잠깐 기다렸다가 규칙이 실제로 생겼는지(관리자 권한 없이도 조회는 가능)
+        # 확인해서 정확한 성공 여부를 돌려준다.
+        import time as _time
+        for _ in range(10):
+            _time.sleep(0.3)
+            try:
+                r = subprocess.run(["netsh", "advfirewall", "firewall", "show", "rule",
+                                    f"name={rule_name}"], capture_output=True, timeout=5,
+                                   creationflags=no_window)
+                if r.returncode == 0 and rule_name.encode() in r.stdout:
+                    return True
+            except Exception:
+                pass
+        return False
 
     def _apply_name_dialog(self):
         nm = self._embed_prompt_text("이름 변경", "표시 이름을 입력하세요",
