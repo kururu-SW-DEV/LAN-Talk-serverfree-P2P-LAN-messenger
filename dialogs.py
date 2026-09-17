@@ -564,6 +564,22 @@ class DialogsMixin:
                    kind="error")
         self.root.destroy()
 
+    def _maybe_warn_key_lost(self):
+        """secret.key 파일만 분실되고(삭제·미복사 등) 과거 대화 기록은 남아있는 상태로
+        시작하면, 새로 만들어진 키로는 그 기록을 다시는 복호화할 수 없고 기존 동료와도
+        대화가 끊긴다 — 조용히 새 키를 쓰기 전에 사용자에게 알려 백업 키가 있으면
+        되찾아 넣도록 안내한다."""
+        if self.engine is None or not getattr(self.engine, "key_was_lost", False):
+            return
+        self._embed_alert(
+            "암호화 키를 새로 만들었습니다",
+            "이 PC에서 과거 대화 기록은 발견됐지만, 암호화에 쓰던 secret.key 파일이 없어서 "
+            "새 키를 만들었습니다.\n\n"
+            "- 기존 대화 기록은 이전 키가 없으면 다시 복호화할 수 없습니다.\n"
+            "- 기존 동료들과도 암호화 키가 달라 대화가 되지 않습니다.\n\n"
+            "예전 secret.key 백업이 있다면 지금 이 프로그램 폴더에 덮어쓰고 다시 실행해 주세요.",
+            kind="warning")
+
     def _maybe_first_run(self):
         flag = os.path.join(self.datadir, "firewall_notice_done")
         if self.engine is None or os.path.exists(flag):

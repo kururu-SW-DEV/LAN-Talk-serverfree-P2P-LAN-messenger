@@ -52,7 +52,15 @@ class Engine:
         self.notify_sound_enabled = bool(self._read_settings().get("notify_sound_enabled", True))
         # 사전 공유키 — app_dir()(소스 폴더)에 둔다: 이 폴더를 통째로 복사해 배포하는
         # 기존 방식 그대로, 최초 실행 PC가 만든 키가 복사를 통해 모든 동료에게 퍼진다.
+        # 키 파일이 없는데 기존 대화 기록은 남아있다면(키만 분실/삭제된 경우) 새로
+        # 키를 만들어버리면 과거 기록을 영영 복호화할 수 없고 기존 동료와도 대화가
+        # 끊긴다 — app.py가 시작 후 사용자에게 경고를 띄울 수 있도록 플래그로 남긴다.
+        key_path = os.path.join(app_dir(), "secret.key")
+        had_key_file = os.path.exists(key_path)
+        had_old_logs = os.path.isdir(self.logdir) and any(
+            fn.endswith(".jsonl") for fn in os.listdir(self.logdir))
         self._crypto_key = crypto_layer.load_or_create_key(app_dir())
+        self.key_was_lost = (not had_key_file) and had_old_logs
         self.on_event = on_event or (lambda ev: None)
         self.instance_id = instance_id or uuid.uuid4().hex[:10]
         self.peers = {}                 # (ip, port) -> {name, ip, port, last, static}
@@ -1153,9 +1161,14 @@ class Engine:
                             "ip": ip, "port": port, "last": 0, "static": True}
             pkt = self._presence_packet()
             self._send_dict(pkt, "255.255.255.255", self.port)
+            # 255.255.255.255 브로드캐스트는 라우터/서브넷 경계를 넘지 못한다 — 정적으로
+            # 등록한 상대뿐 아니라, 과거 대화 기록이 있어 self.peers에 영구 보존되는
+            # 상대에게도 유니캐스트로 presence를 보내서 다른 서브넷에 있어도 서로 온라인
+            # 상태를 확인할 수 있게 한다(static이 아니면 12초 타임아웃 뒤 목록에서
+            # 보이지 않게 되므로, 매 주기 self.peers를 다시 읽어도 무한정 쌓이지 않는다).
             with self.plock:
-                statics = [k for k, v in self.peers.items() if v.get("static")]
-            for (ip, port) in statics:
+                unicast_targets = list(self.peers.keys())
+            for (ip, port) in unicast_targets:
                 self._send_dict(pkt, ip, port)
             self._prune()
             self._stop.wait(PRESENCE_INTERVAL)

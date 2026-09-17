@@ -4,8 +4,8 @@
 # 빌드 시 `--version-file=version_info.txt`로 사용한다.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(6, 48, 0, 0),
-    prodvers=(6, 48, 0, 0),
+    filevers=(6, 49, 0, 0),
+    prodvers=(6, 49, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -20,11 +20,11 @@ VSVersionInfo(
           '040904B0',
           [StringStruct('CompanyName', 'LAN Talk'),
           StringStruct('FileDescription', 'LAN Talk'),
-          StringStruct('FileVersion', '6.48.0.0'),
+          StringStruct('FileVersion', '6.49.0.0'),
           StringStruct('InternalName', 'LAN Talk'),
           StringStruct('OriginalFilename', 'LAN Talk.exe'),
           StringStruct('ProductName', 'LAN Talk'),
-          StringStruct('ProductVersion', '6.48.0.0')])
+          StringStruct('ProductVersion', '6.49.0.0')])
       ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]

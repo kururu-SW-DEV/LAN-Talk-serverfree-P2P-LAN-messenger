@@ -184,6 +184,7 @@ class App(DialogsMixin, ChatRendererMixin, ChatSearchMixin, DndMixin):
         self.root.after(80, self._pump)
         self.root.after(350, self._prewarm_emoji_system)
         self.root.after(350, self._prewarm_crypto_pool)
+        self.root.after(500, self._maybe_warn_key_lost)
         self.root.after(600, self._maybe_first_run)
         self.root.bind("<Configure>", self._on_root_resize)
         self.root.bind("<Control-b>", lambda e: self._toggle_sidebar())
