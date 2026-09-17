@@ -191,9 +191,8 @@ class ChatRendererMixin:
                 has_unread = bool(unread)
                 badge_num = "1"
             full_txt = f"{burn_tag}{badge_num}  {tmin}" if has_unread else f"{burn_tag}{tmin}"
-            # v6.48: 사용자 요청으로 내 메시지도 좌측 정렬로 통일(아바타는 그대로 안 붙임).
-            tid = self.chat.create_text(MARGIN_SIDE, self._chat_y, text=full_txt,
-                                        font=FONT_XS, fill=C_AWAY if has_unread else C_MUTE, anchor="nw")
+            tid = self.chat.create_text(w - MARGIN_SIDE, self._chat_y, text=full_txt,
+                                        font=FONT_XS, fill=C_AWAY if has_unread else C_MUTE, anchor="ne")
             bbox = self.chat.bbox(tid)
             self._chat_y = bbox[3] + 4
         else:
@@ -274,35 +273,51 @@ class ChatRendererMixin:
             r_sender = (reply.get("name") or "답장").strip()
             r_snippet = (reply.get("text") or "").replace("\n", " ").strip()[:35]
             q_text = f"{r_sender}\n{r_snippet}"
-            # v6.48: 내 메시지도 좌측 정렬로 통일 — 아바타 들여쓰기가 없는 내
-            # 메시지는 MARGIN_SIDE, 아바타가 있는 상대 메시지는 PEER_BUBBLE_X에서 시작.
-            init_x = MARGIN_SIDE if mine else PEER_BUBBLE_X
-            reply_tid = self.chat.create_text(init_x, top + BUBBLE_PAD_V, text=q_text, font=FONT_XS,
-                                              fill=("#bfdbfe" if mine else C_MUTE), anchor="nw",
-                                              width=max_w - 12, justify="left")
+            if mine:
+                reply_tid = self.chat.create_text(w - MARGIN_SIDE, top + BUBBLE_PAD_V, text=q_text, font=FONT_XS,
+                                                  fill="#bfdbfe", anchor="ne",
+                                                  width=max_w - 12, justify="right")
+            else:
+                reply_tid = self.chat.create_text(PEER_BUBBLE_X, top + BUBBLE_PAD_V, text=q_text, font=FONT_XS,
+                                                  fill=C_MUTE, anchor="nw",
+                                                  width=max_w - 12, justify="left")
             rb = self.chat.bbox(reply_tid)
             reply_h = (rb[3] - rb[1]) + 8
 
-        init_x = MARGIN_SIDE if mine else PEER_BUBBLE_X
-        tid = self.chat.create_text(init_x, top + BUBBLE_PAD_V + reply_h, text=text, font=FONT_MSG,
-                                    fill=("white" if mine else C_TEXT), anchor="nw",
-                                    width=max_w, justify="left")
+        if mine:
+            tid = self.chat.create_text(w - MARGIN_SIDE, top + BUBBLE_PAD_V + reply_h, text=text, font=FONT_MSG,
+                                        fill="white", anchor="ne",
+                                        width=max_w, justify="right")
+        else:
+            tid = self.chat.create_text(PEER_BUBBLE_X, top + BUBBLE_PAD_V + reply_h, text=text, font=FONT_MSG,
+                                        fill=C_TEXT, anchor="nw",
+                                        width=max_w, justify="left")
         bx1, by1, bx2, by2 = self.chat.bbox(tid)
         content_w = bx2 - bx1
         if reply_tid:
             rb = self.chat.bbox(reply_tid)
             content_w = max(content_w, rb[2] - rb[0] + 10)
         bw = content_w + 2 * BUBBLE_PAD_H
-        rx1 = MARGIN_SIDE if mine else PEER_BUBBLE_X
-        rx2 = rx1 + bw
+        if mine:
+            rx2 = w - MARGIN_SIDE
+            rx1 = rx2 - bw
+        else:
+            rx1 = PEER_BUBBLE_X
+            rx2 = rx1 + bw
         ry1 = top
         ry2 = by2 + BUBBLE_PAD_V
-        dx = (rx1 + BUBBLE_PAD_H) - bx1
+        if mine:
+            dx = (rx2 - BUBBLE_PAD_H) - bx2
+        else:
+            dx = (rx1 + BUBBLE_PAD_H) - bx1
         if dx:
             self.chat.move(tid, dx, 0)
         if reply_tid:
             rb = self.chat.bbox(reply_tid)
-            rdx = (rx1 + BUBBLE_PAD_H + 8) - rb[0]
+            if mine:
+                rdx = (rx2 - BUBBLE_PAD_H - 8) - rb[2]
+            else:
+                rdx = (rx1 + BUBBLE_PAD_H + 8) - rb[0]
             self.chat.move(reply_tid, rdx, 0)
             rb = self.chat.bbox(reply_tid)
             reply_bg_id = round_rect(self.chat, rx1 + 6, ry1 + 6, rx2 - 6, ry1 + reply_h + 2, r=6,
@@ -497,7 +512,7 @@ class ChatRendererMixin:
         w = self._chat_width()
         top = self._chat_y
         iw, ih = img.width(), img.height()
-        ix = MARGIN_SIDE if mine else PEER_BUBBLE_X  # v6.48: 내 메시지도 좌측 정렬 통일
+        ix = (w - MARGIN_SIDE - iw) if mine else PEER_BUBBLE_X
         iid = self.chat.create_image(ix, top, image=img, anchor="nw")
         self._push_chat_image(img)  # GC 방지
         pad = 3
@@ -547,8 +562,12 @@ class ChatRendererMixin:
         sb = self.chat.bbox(sub_tid)
         text_h = (nb[3] - nb[1]) + 4 + (sb[3] - sb[1])
         card_h = max(52, text_h + 2 * pad)
-        cx1 = MARGIN_SIDE if mine else PEER_BUBBLE_X  # v6.48: 내 메시지도 좌측 정렬 통일
-        cx2 = cx1 + card_w
+        if mine:
+            cx2 = w - MARGIN_SIDE
+            cx1 = cx2 - card_w
+        else:
+            cx1 = PEER_BUBBLE_X
+            cx2 = cx1 + card_w
         cy1, cy2 = top, top + card_h
         rid = round_rect(self.chat, cx1, cy1, cx2, cy2, r=BUBBLE_RADIUS,
                          fill=(C_ME if mine else C_PEER), outline=("" if mine else C_BORDER))
@@ -596,7 +615,7 @@ class ChatRendererMixin:
         d = STICKER_DIAMETER
         r = d / 2
         top = self._chat_y
-        cx = (MARGIN_SIDE + r) if mine else (PEER_BUBBLE_X + r)  # v6.48: 좌측 정렬 통일
+        cx = (w - MARGIN_SIDE - r) if mine else (PEER_BUBBLE_X + r)
         cy = top + r
         stickers.draw_sticker(self.chat, cx, cy, r, rec.get("sticker_id"), self._chat_images)
         next_y = top + d + 8
